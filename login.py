@@ -13,7 +13,7 @@ from utils import Config, ensure_debug_dir
 
 logger = logging.getLogger("glm_rush")
 
-LOGIN_URL = "https://open.bigmodel.cn/user/login"
+LOGIN_URL = "https://bigmodel.cn/glm-coding?utm_source=bigModel&utm_medium=Special&utm_content=glm-code&utm_campaign=Platform_Ops&_channel_track_key=8BAeCdUS"
 CODING_PAGE = "https://bigmodel.cn/glm-coding"
 
 
@@ -47,7 +47,7 @@ async def perform_login(config: Config) -> LoginSession:
     # Intercept network requests to capture purchase API
     async def handle_request(route, request):
         url = request.url.lower()
-        if any(kw in url for kw in ("subscribe", "order", "purchase", "plan", "buy")):
+        if any(kw in url for kw in ("subscribe", "order", "purchase", "buy")):
             body = None
             try:
                 body = json.loads(request.post_data) if request.post_data else None
@@ -69,7 +69,7 @@ async def perform_login(config: Config) -> LoginSession:
     await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(2)
 
-    if "/user/login" not in page.url:
+    if "/login" not in page.url:
         logger.info("已经登录，跳过登录步骤")
         print("      已经登录 ✓")
     else:
@@ -103,21 +103,25 @@ async def perform_login(config: Config) -> LoginSession:
         await login_btn.click()
         logger.info("点击登录按钮")
 
-        # Wait for navigation away from login
-        await asyncio.sleep(5)
-        if "/user/login" in page.url:
-            debug_dir = ensure_debug_dir()
-            await page.screenshot(path=str(debug_dir / "login_failed.png"))
-            raise RuntimeError("登录失败，请检查账号密码。截图已保存到 debug/login_failed.png")
+        # Wait for login to complete: URL change or SPA async
+        try:
+            await page.wait_for_url(lambda url: "/login" not in url, timeout=8000)
+        except Exception:
+            pass  # SPA may not change URL, that's OK
 
-        print("      登录成功 ✓")
-        logger.info("登录成功")
-
-    # Step 2: Navigate to coding plan page
+    # Step 2: Navigate to coding plan page (also verifies login)
     logger.info("正在导航到 Coding Plan 页面...")
     print("      导航到 Coding Plan 页面...")
     await page.goto(CODING_PAGE, wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(3)
+
+    if "/login" in page.url:
+        debug_dir = ensure_debug_dir()
+        await page.screenshot(path=str(debug_dir / "login_failed.png"))
+        raise RuntimeError("登录失败，请检查账号密码。截图已保存到 debug/login_failed.png")
+
+    print("      登录成功 ✓")
+    logger.info("登录成功")
 
     # Step 3: Capture cookies and auth token
     cookies = await context.cookies()

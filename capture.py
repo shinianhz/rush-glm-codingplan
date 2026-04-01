@@ -6,7 +6,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
-PURCHASE_KEYWORDS = ("subscribe", "order", "purchase", "plan", "buy")
+PURCHASE_KEYWORDS = ("subscribe", "order", "purchase", "buy")
 CAPTURE_FILE = "api_capture.json"
 
 

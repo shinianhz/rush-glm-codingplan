@@ -177,7 +177,7 @@ python3 main.py
 ## 项目结构
 
 ```
-GLM/
+rush-glm-codingplan/
 ├── main.py              # 入口：3 阶段编排（配置→登录→等待→抢购）
 ├── login.py             # Playwright 浏览器登录 + 会话抓取
 ├── sniper.py            # 双通道抢购逻辑（API 直连 + 浏览器点击）

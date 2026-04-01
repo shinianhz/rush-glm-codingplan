@@ -30,8 +30,9 @@ def print_banner(config: Config):
 
 
 async def wait_for_target(config: Config, session):
-    """Phase 2: Countdown with heartbeat."""
+    """Phase 2: Countdown with adaptive sleep, pre-warm, and precision busy-wait."""
     console.print("\n[3/4] 等待开售...")
+    prewarmed = False
 
     while True:
         secs = seconds_until_target(config.target_time)
@@ -52,35 +53,33 @@ async def wait_for_target(config: Config, session):
             end="",
         )
 
-        # Connection pre-warm at 2s before target
-        if secs <= 2.5:
-            console.print("\n      预热连接...")
-            try:
-                async with httpx.AsyncClient() as client:
-                    await client.head("https://bigmodel.cn", timeout=3)
-            except Exception:
-                pass
-
+        # Final precision window: busy-wait
         if secs <= 1.5:
-            # Busy-wait the last ~1.5 seconds for precision
             while seconds_until_target(config.target_time) > 0:
                 pass
             return True
 
-        # Heartbeat every 5 seconds
-        try:
-            resp = await session.page.evaluate("fetch('/api/paas/v4/user/info').then(r=>r.ok)")
-            if not resp:
-                console.print("\n[yellow]会话可能过期，尝试刷新...[/yellow]")
-                await session.page.reload(wait_until="domcontentloaded", timeout=10000)
-        except Exception:
-            console.print("\n[yellow]心跳检测失败，尝试刷新页面...[/yellow]")
+        # Pre-warm connection once at ~3s before target
+        if secs <= 3 and not prewarmed:
+            prewarmed = True
+            console.print("\n      预热连接...")
             try:
-                await session.page.reload(wait_until="domcontentloaded", timeout=10000)
+                async with httpx.AsyncClient() as client:
+                    await client.head("https://bigmodel.cn", timeout=2)
             except Exception:
                 pass
+            continue  # Re-check immediately, don't sleep past target
 
-        await asyncio.sleep(5)
+        # Heartbeat: check page URL, no aggressive refresh
+        try:
+            if "login" in session.page.url.lower():
+                console.print("\n[yellow]会话可能已过期，请检查浏览器[/yellow]")
+        except Exception:
+            pass
+
+        # Adaptive sleep: always wake up at least 3.5s before target
+        sleep_time = min(5.0, max(0.1, secs - 3.5))
+        await asyncio.sleep(sleep_time)
 
 
 async def execute_rush(config: Config, session):
@@ -93,7 +92,7 @@ async def execute_rush(config: Config, session):
         console.print("[bold]通道 1: API 直连[/bold]")
         logger.info("启动 API 通道")
 
-        headers = session.endpoint.headers or {}
+        headers = {**(session.endpoint.headers or {})}
         if session.auth_token:
             headers["Authorization"] = f"Bearer {session.auth_token}"
 
@@ -167,4 +166,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
