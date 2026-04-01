@@ -1,0 +1,6 @@
+config.json
+api_capture.json
+debug/
+rush.log
+__pycache__/
+*.pyc

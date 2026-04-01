@@ -1,0 +1,8 @@
+{
+  "phone": "your_phone_number",
+  "password": "your_password",
+  "plan": "Pro",
+  "target_time": "10:00:00",
+  "max_retries": 10,
+  "retry_interval_ms": 500
+}
