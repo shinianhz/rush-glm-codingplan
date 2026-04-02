@@ -33,7 +33,7 @@
 ### 2. 安装
 
 ```bash
-cd /Users/allen/Documents/Code/allen-\ project/GLM
+cd /Users/***/rush-glm-codingplan
 
 # 安装 Python 依赖
 pip3 install -r requirements.txt
