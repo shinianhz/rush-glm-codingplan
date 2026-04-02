@@ -32,6 +32,9 @@ Start
 ### 2. Install
 
 ```bash
+cd /Users/allen/Documents/Code/allen-\ project/GLM
+
+# 安装 Python 依赖
 pip3 install -r requirements.txt
 playwright install chromium
 ```
