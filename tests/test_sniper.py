@@ -1,6 +1,11 @@
 # tests/test_sniper.py
+import asyncio
+
 import pytest
-from sniper import detect_api_result, detect_browser_result, RushResult, RushStatus
+
+from capture import PurchaseEndpoint
+from sniper import detect_api_result, rush_direct, rush_via_api, RushStatus
+from utils import Config
 
 
 class TestDetectApiResult:
@@ -33,20 +38,88 @@ class TestDetectApiResult:
         result = detect_api_result(500, {"error": "internal"})
         assert result.status == RushStatus.RETRY
 
+    def test_auth_failed_401(self):
+        body = {"error": {"code": "1001", "message": "Header中未收到Authorization参数"}}
+        result = detect_api_result(401, body)
+        assert result.status == RushStatus.FAILED
+        assert "401" in result.message
+        assert "Authorization" in result.message
 
-class TestDetectBrowserResult:
-    def test_success_text_found(self):
-        result = detect_browser_result("购买成功！感谢您的支持")
+    def test_created_response_is_treated_as_success(self):
+        result = detect_api_result(201, {"success": True})
         assert result.status == RushStatus.SUCCESS
 
-    def test_already_subscribed_text(self):
-        result = detect_browser_result("您已订阅该套餐")
-        assert result.status == RushStatus.ALREADY_DONE
 
-    def test_sold_out_text(self):
-        result = detect_browser_result("已售罄")
-        assert result.status == RushStatus.FAILED
+class RecordingClient:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
 
-    def test_unknown_page(self):
-        result = detect_browser_result("GLM Coding Plan")
-        assert result.status == RushStatus.UNKNOWN
+    async def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        return self.response
+
+
+class ResponseStub:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = ""
+
+    def json(self):
+        return self._payload
+
+
+class TestRequestBehavior:
+    def test_rush_via_api_preserves_captured_authorization_header(self):
+        endpoint = PurchaseEndpoint(
+            url="https://bigmodel.cn/api/paas/v4/subscribe",
+            method="POST",
+            headers={"Authorization": "Bearer captured-token"},
+            body={"plan": "pro"},
+        )
+        config = Config(
+            phone="13800138000",
+            password="secret",
+            plan="Pro",
+            target_time="10:00:00",
+            max_retries=1,
+        )
+        client = RecordingClient(ResponseStub(200, {"success": True}))
+
+        result = asyncio.run(
+            rush_via_api(
+                client,
+                endpoint,
+                config,
+                extra_headers={"Origin": "https://bigmodel.cn"},
+            )
+        )
+
+        assert result.status == RushStatus.SUCCESS
+        assert client.calls[0]["headers"]["Authorization"] == "Bearer captured-token"
+
+    def test_rush_direct_get_uses_query_params_not_json_body(self):
+        config = Config(
+            phone="13800138000",
+            password="secret",
+            plan="Pro",
+            target_time="10:00:00",
+            max_retries=1,
+        )
+        client = RecordingClient(ResponseStub(200, {"success": True}))
+
+        result = asyncio.run(
+            rush_direct(
+                client,
+                "https://bigmodel.cn/api/paas/v4/subscribe",
+                "GET",
+                {"foo": "bar"},
+                config,
+            )
+        )
+
+        assert result.status == RushStatus.SUCCESS
+        assert client.calls[0]["method"] == "GET"
+        assert client.calls[0]["params"]["foo"] == "bar"
+        assert "json" not in client.calls[0]
