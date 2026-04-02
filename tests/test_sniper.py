@@ -14,9 +14,35 @@ class TestDetectApiResult:
         assert result.status == RushStatus.SUCCESS
         assert "ORD-123" in result.message
 
-    def test_success_with_success_flag(self):
-        result = detect_api_result(200, {"success": True})
+    def test_success_with_payment_confirmation(self):
+        result = detect_api_result(200, {
+            "success": True,
+            "data": {"payAmount": 149, "soldOut": False},
+        })
         assert result.status == RushStatus.SUCCESS
+
+    def test_sold_out_is_retry_not_success(self):
+        result = detect_api_result(200, {
+            "code": 200,
+            "success": True,
+            "data": {"soldOut": True, "payAmount": None},
+        })
+        assert result.status == RushStatus.RETRY
+        assert "售罄" in result.message
+
+    def test_success_true_without_payment_is_retry(self):
+        result = detect_api_result(200, {"success": True})
+        assert result.status == RushStatus.RETRY
+        assert "无购买确认" in result.message
+
+    def test_system_busy_code_555_is_retry(self):
+        result = detect_api_result(200, {
+            "code": 555,
+            "msg": "系统繁忙，请稍后再试",
+            "success": False,
+        })
+        assert result.status == RushStatus.RETRY
+        assert "系统繁忙" in result.message
 
     def test_already_subscribed(self):
         result = detect_api_result(200, {"message": "already subscribed"})
@@ -45,8 +71,11 @@ class TestDetectApiResult:
         assert "401" in result.message
         assert "Authorization" in result.message
 
-    def test_created_response_is_treated_as_success(self):
-        result = detect_api_result(201, {"success": True})
+    def test_created_response_with_payment_is_success(self):
+        result = detect_api_result(201, {
+            "success": True,
+            "data": {"cashAmount": 100},
+        })
         assert result.status == RushStatus.SUCCESS
 
 
@@ -85,7 +114,10 @@ class TestRequestBehavior:
             target_time="10:00:00",
             max_retries=1,
         )
-        client = RecordingClient(ResponseStub(200, {"success": True}))
+        client = RecordingClient(ResponseStub(200, {
+            "success": True,
+            "data": {"payAmount": 149},
+        }))
 
         result = asyncio.run(
             rush_via_api(
@@ -107,7 +139,10 @@ class TestRequestBehavior:
             target_time="10:00:00",
             max_retries=1,
         )
-        client = RecordingClient(ResponseStub(200, {"success": True}))
+        client = RecordingClient(ResponseStub(200, {
+            "success": True,
+            "data": {"payAmount": 100},
+        }))
 
         result = asyncio.run(
             rush_direct(

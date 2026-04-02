@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import logging
 
@@ -101,6 +102,8 @@ async def _do_purchase(
     config: Config,
 ) -> tuple[RushStatus, str]:
     """Core purchase logic: POST to pay/preview with productId."""
+    logger = logging.getLogger("glm_rush")
+
     headers = {
         "Content-Type": "application/json;charset=UTF-8",
         "Accept": "application/json, text/plain, */*",
@@ -116,9 +119,15 @@ async def _do_purchase(
 
     body = {"productId": product_id}
 
+    # Log request details once before loop
+    safe_headers = {k: (v[:20] + "..." if k.lower() == "authorization" and len(v) > 20 else v)
+                    for k, v in headers.items()}
+    logger.info(f"[API] 请求配置: URL={url}")
+    logger.info(f"[API] 请求头: {json.dumps(safe_headers, ensure_ascii=False)}")
+    logger.info(f"[API] 请求体: {json.dumps(body, ensure_ascii=False)}")
+
     for attempt in range(1, config.max_retries + 1):
-        logger = logging.getLogger("glm_rush")
-        logger.info(f"[API] 尝试 {attempt}/{config.max_retries} product={product_id}")
+        logger.info(f"[API] === 尝试 {attempt}/{config.max_retries} ===")
         try:
             resp = await client.request(
                 "POST",
@@ -127,16 +136,32 @@ async def _do_purchase(
                 headers=headers,
                 timeout=10.0,
             )
-            result = detect_api_result(resp.status_code, parse_response_json(resp))
+            resp_body = parse_response_json(resp)
+
+            # Log full response details
+            logger.info(f"[API] 响应状态码: {resp.status_code}")
+            logger.info(f"[API] 响应头: {dict(resp.headers)}")
+            logger.info(f"[API] 响应体: {json.dumps(resp_body, ensure_ascii=False)[:1000]}")
+
+            result = detect_api_result(resp.status_code, resp_body)
             result.attempt = attempt
-            logger.info(f"[API] → {result.status.value}: {result.message}")
+            logger.info(f"[API] 结果: {result.status.value} - {result.message}")
 
             if result.status in (RushStatus.SUCCESS, RushStatus.ALREADY_DONE, RushStatus.FAILED):
                 return result.status, result.message
+
+            # Print retry info to console too
+            console.print(f"      [dim]尝试 {attempt}: {resp.status_code} → {result.message}[/dim]")
+
         except httpx.TimeoutException:
-            logger.warning(f"[API] 尝试 {attempt} 超时")
+            logger.warning(f"[API] 尝试 {attempt} 超时 (10s)")
+            console.print(f"      [dim]尝试 {attempt}: 超时[/dim]")
+        except httpx.ConnectError as e:
+            logger.error(f"[API] 尝试 {attempt} 连接失败: {e}")
+            console.print(f"      [dim]尝试 {attempt}: 连接失败 - {e}[/dim]")
         except Exception as e:
-            logger.warning(f"[API] 尝试 {attempt} 异常: {e}")
+            logger.error(f"[API] 尝试 {attempt} 异常: {type(e).__name__}: {e}", exc_info=True)
+            console.print(f"      [dim]尝试 {attempt}: {type(e).__name__} - {e}[/dim]")
 
         await asyncio.sleep(config.retry_interval_ms / 1000)
 
@@ -157,9 +182,25 @@ async def execute_rush(config: Config, session: LoginSession) -> bool:
     site_headers = session.site_headers or {}
     jar = httpx_cookies_from_playwright(session.cookies)
 
+    # Print diagnostic info
     console.print(f"      产品ID: [cyan]{product_id}[/cyan]")
-    console.print(f"      Auth Token: {'有' if auth_token else '无'}")
-    console.print(f"      Site Headers: {list(site_headers.keys()) if site_headers else '无'}")
+    console.print(f"      购买URL: [cyan]{PURCHASE_URL}[/cyan]")
+    console.print(f"      Auth Token: {'有 (' + auth_token[:20] + '...)' if auth_token else '[red]无[/red]'}")
+    console.print(f"      Site Headers: {site_headers if site_headers else '[yellow]无[/yellow]'}")
+    console.print(f"      Cookies: {len(session.cookies)} 个")
+
+    # Log full session details
+    logger.info(f"[RUSH] 开始抢购: plan={config.plan}, product_id={product_id}")
+    logger.info(f"[RUSH] auth_token={'有 (' + auth_token[:30] + '...)' if auth_token else '无'}")
+    logger.info(f"[RUSH] site_headers={json.dumps(site_headers, ensure_ascii=False)}")
+    logger.info(f"[RUSH] cookies数量={len(session.cookies)}")
+
+    if not auth_token:
+        console.print("      [bold red]警告: 无 auth token，请求可能返回 401![/bold red]")
+        logger.warning("[RUSH] 无 auth token，抢购请求可能失败")
+    if not site_headers:
+        console.print("      [bold yellow]警告: 无 bigmodel-organization/project headers[/bold yellow]")
+        logger.warning("[RUSH] 无 site_headers，缺少 org/project 信息")
 
     async with httpx.AsyncClient(cookies=jar) as client:
         status, message = await _do_purchase(
@@ -174,6 +215,7 @@ async def execute_rush(config: Config, session: LoginSession) -> bool:
             return True
 
     console.print(f"\n[bold red]抢购失败: {message}[/bold red]")
+    console.print("[dim]详细信息请查看 rush.log[/dim]")
     return False
 
 

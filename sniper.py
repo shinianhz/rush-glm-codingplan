@@ -52,16 +52,38 @@ def detect_api_result(status_code: int, body: dict) -> RushResult:
         )
 
     if 200 <= status_code < 300:
-        if body.get("order_id") or body.get("success") is True:
-            order_info = body.get("order_id", "")
-            return RushResult(
-                RushStatus.SUCCESS,
-                f"购买成功! 订单号: {order_info}" if order_info else "购买成功!",
-            )
+        # Check inner data for soldOut / actual purchase confirmation
+        data = body.get("data")
+        # print(" api response data:", data)
+
+        if isinstance(data, dict):
+            if data.get("soldOut") is True:
+
+                return RushResult(RushStatus.RETRY, "商品已售罄，继续重试")
+            # Real purchase success: has payAmount or cashAmount (non-null)
+            has_payment = data.get("payAmount") is not None or data.get("cashAmount") is not None
+            if has_payment and body.get("success") is True:
+                return RushResult(RushStatus.SUCCESS, f"购买成功! {data}")
+        elif body.get("order_id"):
+            return RushResult(RushStatus.SUCCESS, f"购买成功! 订单号: {body['order_id']}")
+
+        # Top-level code/msg checks for error messages even on HTTP 200
+        code = body.get("code")
+        api_msg = str(body.get("msg", ""))
+        if code == 500 and "不支持购买" in api_msg:
+            return RushResult(RushStatus.RETRY, f"套餐暂不可购买: {api_msg}")
+        if code == 555 or "系统繁忙" in api_msg:
+            return RushResult(RushStatus.RETRY, f"系统繁忙: {api_msg}")
+
         if "already" in msg_lower or "已订阅" in msg_lower or "already_subscribed" in msg_lower:
             return RushResult(RushStatus.ALREADY_DONE, "已订阅该套餐")
         if "insufficient" in msg_lower or "余额不足" in msg_lower:
             return RushResult(RushStatus.FAILED, "余额不足，购买失败")
+
+        # success:true but no data — ambiguous, retry
+        if body.get("success") is True:
+            return RushResult(RushStatus.RETRY, f"响应成功但无购买确认: {body}")
+
         return RushResult(RushStatus.RETRY, f"未知成功响应: {body}")
 
     if status_code in (429, 502, 503, 504):

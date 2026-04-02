@@ -219,7 +219,10 @@ async def perform_login(config: Config) -> LoginSession:
     pw = await async_playwright().start()
     browser = None
     try:
-        browser = await pw.chromium.launch(headless=False)
+        browser = await pw.chromium.launch(
+            headless=False,
+            args=["--no-proxy-server"],
+        )
 
         ctx_kwargs: dict[str, Any] = {}
         ssp = (config.storage_state_path or "").strip()
