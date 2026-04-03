@@ -21,13 +21,13 @@ class TestDetectApiResult:
         })
         assert result.status == RushStatus.SUCCESS
 
-    def test_sold_out_is_retry_not_success(self):
+    def test_sold_out_is_failed_not_retry(self):
         result = detect_api_result(200, {
             "code": 200,
             "success": True,
             "data": {"soldOut": True, "payAmount": None},
         })
-        assert result.status == RushStatus.RETRY
+        assert result.status == RushStatus.FAILED
         assert "售罄" in result.message
 
     def test_success_true_without_payment_is_retry(self):

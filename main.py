@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 import logging
+import time
 
 import httpx
 from rich.console import Console
@@ -35,11 +36,12 @@ def print_banner(config: Config):
     phone_masked = mask_phone(config.phone)
     pid = config.resolved_product_id or "未配置"
     console.print(Panel.fit(
-        f"[bold]GLM Coding Plan Rush (纯 API)[/bold]\n"
+        f"[bold]GLM Coding Plan Rush (并发 API)[/bold]\n"
         f"档位: [cyan]{config.plan}[/cyan]\n"
         f"手机: [dim]{phone_masked}[/dim]\n"
         f"目标时间: [cyan]{config.target_time}[/cyan]\n"
-        f"最大重试: [cyan]{config.max_retries}[/cyan]\n"
+        f"并发数: [cyan]{config.concurrency}[/cyan]\n"
+        f"抢购窗口: [cyan]{config.rush_duration_s}s[/cyan]\n"
         f"产品ID: [cyan]{pid}[/cyan]\n"
         f"购买端点: [cyan]{PURCHASE_URL}[/cyan]",
         title="[1/4] 配置已加载",
@@ -82,7 +84,7 @@ async def wait_for_target(config: Config) -> bool:
             prewarmed = True
             console.print("\n      预热连接...")
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(http2=True) as client:
                     await client.head("https://bigmodel.cn", timeout=2)
             except Exception:
                 pass
@@ -93,6 +95,33 @@ async def wait_for_target(config: Config) -> bool:
         await asyncio.sleep(sleep_time)
 
 
+async def _single_request(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    body: dict,
+    worker_id: int,
+    attempt: int,
+) -> tuple[RushStatus, str]:
+    """Fire a single purchase request and classify the result."""
+    logger = logging.getLogger("glm_rush")
+    try:
+        resp = await client.request("POST", url, json=body, headers=headers, timeout=10.0)
+        resp_body = parse_response_json(resp)
+        logger.info(f"[W{worker_id}] #{attempt} → {resp.status_code}: {json.dumps(resp_body, ensure_ascii=False)[:300]}")
+        result = detect_api_result(resp.status_code, resp_body)
+        return result.status, result.message
+    except httpx.TimeoutException:
+        logger.debug(f"[W{worker_id}] #{attempt} 超时")
+        return RushStatus.RETRY, "超时"
+    except httpx.ConnectError as e:
+        logger.debug(f"[W{worker_id}] #{attempt} 连接失败: {e}")
+        return RushStatus.RETRY, f"连接失败: {e}"
+    except Exception as e:
+        logger.debug(f"[W{worker_id}] #{attempt} 异常: {type(e).__name__}: {e}")
+        return RushStatus.RETRY, f"{type(e).__name__}: {e}"
+
+
 async def _do_purchase(
     client: httpx.AsyncClient,
     url: str,
@@ -101,7 +130,7 @@ async def _do_purchase(
     product_id: str,
     config: Config,
 ) -> tuple[RushStatus, str]:
-    """Core purchase logic: POST to pay/preview with productId."""
+    """Concurrent rush: N workers fire requests in parallel for rush_duration_s seconds."""
     logger = logging.getLogger("glm_rush")
 
     headers = {
@@ -111,66 +140,63 @@ async def _do_purchase(
         "Referer": "https://bigmodel.cn/glm-coding",
         "set-language": "zh",
     }
-    # Raw JWT — no "Bearer " prefix!
     if auth_token:
         headers["Authorization"] = auth_token
-    # Merge captured org/project headers
     headers.update(site_headers)
 
     body = {"productId": product_id}
 
-    # Log request details once before loop
     safe_headers = {k: (v[:20] + "..." if k.lower() == "authorization" and len(v) > 20 else v)
                     for k, v in headers.items()}
-    logger.info(f"[API] 请求配置: URL={url}")
+    logger.info(f"[RUSH] 并发 {config.concurrency} 工作线程, 持续 {config.rush_duration_s}s")
     logger.info(f"[API] 请求头: {json.dumps(safe_headers, ensure_ascii=False)}")
     logger.info(f"[API] 请求体: {json.dumps(body, ensure_ascii=False)}")
 
-    for attempt in range(1, config.max_retries + 1):
-        logger.info(f"[API] === 尝试 {attempt}/{config.max_retries} ===")
-        try:
-            resp = await client.request(
-                "POST",
-                url,
-                json=body,
-                headers=headers,
-                timeout=10.0,
+    deadline = time.monotonic() + config.rush_duration_s
+    total_attempts = 0
+    stop_event = asyncio.Event()
+    results: list[tuple[RushStatus, str]] = []
+
+    async def worker(worker_id: int):
+        nonlocal total_attempts
+        while not stop_event.is_set() and time.monotonic() < deadline:
+            total_attempts += 1
+            status, message = await _single_request(
+                client, url, headers, body, worker_id, total_attempts,
             )
-            resp_body = parse_response_json(resp)
 
-            # Log full response details
-            logger.info(f"[API] 响应状态码: {resp.status_code}")
-            logger.info(f"[API] 响应头: {dict(resp.headers)}")
-            logger.info(f"[API] 响应体: {json.dumps(resp_body, ensure_ascii=False)[:1000]}")
+            if status == RushStatus.SUCCESS:
+                stop_event.set()
+                results.append((status, message))
+                return
+            if status == RushStatus.ALREADY_DONE:
+                stop_event.set()
+                results.append((status, message))
+                return
+            if status == RushStatus.FAILED:
+                stop_event.set()
+                results.append((status, message))
+                return
 
-            result = detect_api_result(resp.status_code, resp_body)
-            result.attempt = attempt
-            logger.info(f"[API] 结果: {result.status.value} - {result.message}")
+            # RETRY — fire again immediately (no sleep on 555)
+            console.print(f"      [dim]W{worker_id} #{total_attempts}: {message}[/dim]")
 
-            if result.status in (RushStatus.SUCCESS, RushStatus.ALREADY_DONE, RushStatus.FAILED):
-                return result.status, result.message
+    # Launch concurrent workers
+    workers = [asyncio.create_task(worker(i)) for i in range(config.concurrency)]
 
-            # Print retry info to console too
-            console.print(f"      [dim]尝试 {attempt}: {resp.status_code} → {result.message}[/dim]")
+    # Wait for all workers to finish (either deadline or early stop)
+    await asyncio.gather(*workers, return_exceptions=True)
 
-        except httpx.TimeoutException:
-            logger.warning(f"[API] 尝试 {attempt} 超时 (10s)")
-            console.print(f"      [dim]尝试 {attempt}: 超时[/dim]")
-        except httpx.ConnectError as e:
-            logger.error(f"[API] 尝试 {attempt} 连接失败: {e}")
-            console.print(f"      [dim]尝试 {attempt}: 连接失败 - {e}[/dim]")
-        except Exception as e:
-            logger.error(f"[API] 尝试 {attempt} 异常: {type(e).__name__}: {e}", exc_info=True)
-            console.print(f"      [dim]尝试 {attempt}: {type(e).__name__} - {e}[/dim]")
+    if results:
+        return results[0]
 
-        await asyncio.sleep(config.retry_interval_ms / 1000)
-
-    return RushStatus.FAILED, "API 通道全部失败"
+    logger.info(f"[RUSH] {total_attempts} 次请求，全部未成功")
+    return RushStatus.FAILED, f"{total_attempts} 次请求全部未成功 ({config.rush_duration_s}s)"
 
 
 async def execute_rush(config: Config, session: LoginSession) -> bool:
-    """Phase 3: Pure API rush purchase via pay/preview."""
-    console.print(f"\n[4/4] 开始抢购 [cyan]{config.plan}[/cyan]!\n")
+    """Phase 3: Concurrent API rush purchase."""
+    console.print(f"\n[4/4] 开始抢购 [cyan]{config.plan}[/cyan]! (并发 {config.concurrency}, 持续 {config.rush_duration_s}s)\n")
     logger = logging.getLogger("glm_rush")
 
     product_id = config.resolved_product_id
@@ -182,14 +208,12 @@ async def execute_rush(config: Config, session: LoginSession) -> bool:
     site_headers = session.site_headers or {}
     jar = httpx_cookies_from_playwright(session.cookies)
 
-    # Print diagnostic info
     console.print(f"      产品ID: [cyan]{product_id}[/cyan]")
     console.print(f"      购买URL: [cyan]{PURCHASE_URL}[/cyan]")
     console.print(f"      Auth Token: {'有 (' + auth_token[:20] + '...)' if auth_token else '[red]无[/red]'}")
     console.print(f"      Site Headers: {site_headers if site_headers else '[yellow]无[/yellow]'}")
     console.print(f"      Cookies: {len(session.cookies)} 个")
 
-    # Log full session details
     logger.info(f"[RUSH] 开始抢购: plan={config.plan}, product_id={product_id}")
     logger.info(f"[RUSH] auth_token={'有 (' + auth_token[:30] + '...)' if auth_token else '无'}")
     logger.info(f"[RUSH] site_headers={json.dumps(site_headers, ensure_ascii=False)}")
@@ -202,7 +226,14 @@ async def execute_rush(config: Config, session: LoginSession) -> bool:
         console.print("      [bold yellow]警告: 无 bigmodel-organization/project headers[/bold yellow]")
         logger.warning("[RUSH] 无 site_headers，缺少 org/project 信息")
 
-    async with httpx.AsyncClient(cookies=jar) as client:
+    # Try HTTP/2, fall back to HTTP/1.1 if h2 not installed
+    try:
+        import h2  # noqa: F401
+        use_http2 = True
+    except ImportError:
+        use_http2 = False
+
+    async with httpx.AsyncClient(cookies=jar, http2=use_http2) as client:
         status, message = await _do_purchase(
             client, PURCHASE_URL, auth_token, site_headers, product_id, config,
         )
@@ -221,7 +252,7 @@ async def execute_rush(config: Config, session: LoginSession) -> bool:
 
 async def main():
     logger = setup_logger()
-    logger.info("=== GLM Rush (纯 API) 启动 ===")
+    logger.info("=== GLM Rush (并发 API) 启动 ===")
 
     # Phase 1: Load config & login
     try:
@@ -249,7 +280,7 @@ async def main():
         console.print("[red]未能到达目标时间[/red]")
         sys.exit(1)
 
-    # Phase 3: Rush (pure API)
+    # Phase 3: Rush (concurrent API)
     success = await execute_rush(config, session)
     logger.info(f"最终结果: {'成功' if success else '失败'}")
 

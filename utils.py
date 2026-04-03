@@ -30,6 +30,8 @@ class Config:
     target_time: str
     max_retries: int = 10
     retry_interval_ms: int = 500
+    rush_duration_s: int = 60        # Total rush window in seconds
+    concurrency: int = 5             # Parallel request workers
     purchase_url: str = ""
     purchase_method: str = "POST"
     purchase_body: dict | None = None
@@ -105,6 +107,8 @@ def load_config(path: str = "config.json") -> Config:
         target_time=target_time,
         max_retries=data.get("max_retries", 10),
         retry_interval_ms=data.get("retry_interval_ms", 500),
+        rush_duration_s=data.get("rush_duration_s", 60),
+        concurrency=data.get("concurrency", 5),
         purchase_url=data.get("purchase_url", ""),
         purchase_method=purchase_method,
         purchase_body=data.get("purchase_body"),

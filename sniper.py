@@ -54,12 +54,12 @@ def detect_api_result(status_code: int, body: dict) -> RushResult:
     if 200 <= status_code < 300:
         # Check inner data for soldOut / actual purchase confirmation
         data = body.get("data")
-        # print(" api response data:", data)
+        print(" api response data:", data)
 
         if isinstance(data, dict):
             if data.get("soldOut") is True:
-
-                return RushResult(RushStatus.RETRY, "商品已售罄，继续重试")
+                
+                return RushResult(RushStatus.FAILED, "商品已售罄")
             # Real purchase success: has payAmount or cashAmount (non-null)
             has_payment = data.get("payAmount") is not None or data.get("cashAmount") is not None
             if has_payment and body.get("success") is True:
