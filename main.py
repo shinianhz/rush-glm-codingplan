@@ -24,7 +24,6 @@ from login import LoginSession, perform_login
 from sniper import (
     rush_via_api,
     rush_direct,
-    detect_api_result,
     RushStatus,
     parse_response_json,
 )
@@ -103,14 +102,61 @@ async def _single_request(
     worker_id: int,
     attempt: int,
 ) -> tuple[RushStatus, str]:
-    """Fire a single purchase request and classify the result."""
+    """Fire a single preview request. Preview = final payment for balance.
+
+    POST /pay/preview with payType=BALANCE directly deducts balance and
+    completes the purchase. No submit/create-sign step needed.
+    """
     logger = logging.getLogger("glm_rush")
     try:
         resp = await client.request("POST", url, json=body, headers=headers, timeout=10.0)
         resp_body = parse_response_json(resp)
-        logger.info(f"[W{worker_id}] #{attempt} → {resp.status_code}: {json.dumps(resp_body, ensure_ascii=False)[:300]}")
-        result = detect_api_result(resp.status_code, resp_body)
-        return result.status, result.message
+        logger.info(f"[W{worker_id}] #{attempt} PREVIEW → {resp.status_code}: {json.dumps(resp_body, ensure_ascii=False)[:2000]}")
+
+        # Auth errors
+        if resp.status_code in (401, 403):
+            return RushStatus.FAILED, f"鉴权失败 ({resp.status_code}): {resp_body}"
+
+        # Server busy / rate limit
+        if resp.status_code in (429, 502, 503, 504):
+            return RushStatus.RETRY, f"服务繁忙 ({resp.status_code})"
+        if resp.status_code == 500:
+            return RushStatus.RETRY, f"服务器错误: {resp_body}"
+
+        if not (200 <= resp.status_code < 300):
+            return RushStatus.RETRY, f"状态码 {resp.status_code}: {resp_body}"
+
+        # HTTP 200 — classify response
+        data = resp_body.get("data") or {}
+        msg = str(resp_body.get("msg", ""))
+        code = resp_body.get("code")
+
+        # System busy (555 code)
+        if code == 555 or "系统繁忙" in msg:
+            return RushStatus.RETRY, f"系统繁忙: {msg}"
+
+        # Sold out
+        if isinstance(data, dict) and data.get("soldOut") is True:
+            return RushStatus.RETRY, "商品已售罄"
+
+        # Already subscribed
+        if "已订阅" in msg or "already" in msg.lower():
+            return RushStatus.ALREADY_DONE, f"已订阅: {msg}"
+
+        # Insufficient balance
+        if "余额不足" in msg or "insufficient" in msg.lower():
+            return RushStatus.FAILED, f"余额不足: {msg}"
+
+        # Purchase success: code 200 + success true + has bizId
+        if code == 200 and resp_body.get("success") is True and isinstance(data, dict):
+            biz_id = data.get("bizId", "")
+            if biz_id:
+                console.print(f"      [bold green]W{worker_id} #{attempt}: 购买成功! bizId={biz_id[:12]}...[/bold green]")
+                return RushStatus.SUCCESS, f"购买成功! bizId={biz_id}, 金额={data.get('payAmount', '?')}"
+
+        # Retry on ambiguous response
+        return RushStatus.RETRY, f"未确认响应: code={code}, msg={msg}"
+
     except httpx.TimeoutException:
         logger.debug(f"[W{worker_id}] #{attempt} 超时")
         return RushStatus.RETRY, "超时"
@@ -130,7 +176,7 @@ async def _do_purchase(
     product_id: str,
     config: Config,
 ) -> tuple[RushStatus, str]:
-    """Concurrent rush: N workers fire requests in parallel for rush_duration_s seconds."""
+    """Concurrent rush: N workers fire preview requests in parallel for rush_duration_s seconds."""
     logger = logging.getLogger("glm_rush")
 
     headers = {
@@ -144,7 +190,14 @@ async def _do_purchase(
         headers["Authorization"] = auth_token
     headers.update(site_headers)
 
-    body = {"productId": product_id}
+    body = {
+        "productId": product_id,
+        "payType": "BALANCE",
+        "quantity": 1,
+        "cycle": "month",
+        "autoRenew": False,
+        "isUpgrade": False,
+    }
 
     safe_headers = {k: (v[:20] + "..." if k.lower() == "authorization" and len(v) > 20 else v)
                     for k, v in headers.items()}
@@ -178,7 +231,7 @@ async def _do_purchase(
                 results.append((status, message))
                 return
 
-            # RETRY — fire again immediately (no sleep on 555)
+            # RETRY — fire again immediately
             console.print(f"      [dim]W{worker_id} #{total_attempts}: {message}[/dim]")
 
     # Launch concurrent workers
@@ -226,14 +279,7 @@ async def execute_rush(config: Config, session: LoginSession) -> bool:
         console.print("      [bold yellow]警告: 无 bigmodel-organization/project headers[/bold yellow]")
         logger.warning("[RUSH] 无 site_headers，缺少 org/project 信息")
 
-    # Try HTTP/2, fall back to HTTP/1.1 if h2 not installed
-    try:
-        import h2  # noqa: F401
-        use_http2 = True
-    except ImportError:
-        use_http2 = False
-
-    async with httpx.AsyncClient(cookies=jar, http2=use_http2) as client:
+    async with httpx.AsyncClient(cookies=jar, http2=True) as client:
         status, message = await _do_purchase(
             client, PURCHASE_URL, auth_token, site_headers, product_id, config,
         )

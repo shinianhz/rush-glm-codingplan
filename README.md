@@ -129,7 +129,8 @@ Expected output:
 
 ### 5. Prerequisites
 
-- Ensure your Zhipu account has **sufficient balance**. The script uses balance auto-deduction, no QR code scanning needed.
+- Ensure your Zhipu account has **sufficient balance**. You need to **recharge/top up in your personal account** before running the script. The script uses balance auto-deduction, no QR code scanning needed.
+- **Turn off VPN** before running the script. VPN connections may cause network issues or API request failures when accessing bigmodel.cn.
 
 ## Tests
 
