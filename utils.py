@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
+import httpx
+
 VALID_PLANS = ("Lite", "Pro", "Max")
 VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
@@ -163,7 +165,6 @@ def strip_bearer_prefix(token: str) -> str:
 
 
 def httpx_cookies_from_playwright(rows: list[dict]) -> "httpx.Cookies":
-    import httpx
 
     jar = httpx.Cookies()
     for c in rows:
